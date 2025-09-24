@@ -4,7 +4,7 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import parseaddr, formataddr
 import smtplib
-import datetime
+from datetime import datetime, timezone
 from loguru import logger
 
 framework = """
@@ -58,55 +58,136 @@ def get_empty_html():
     return block_template
 
 
-def get_summary_html(summary: str):
-    summary = summary.replace("{", "{{").replace("}", "}}")
+def get_summary_html(content: str) -> str:
     style = """
-        <style>
-            h2 {
-                color: #2c3e50;
-                border-bottom: 3px solid #3498db;
-                padding-bottom: 12px;
-                margin: 25px 0 20px 0;
-                font-size: 28px;
-                font-weight: bold;
-                text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
-            }
-            p {
-                color: #34495e;
-                line-height: 1.8;
-                margin: 15px 0;
-                font-size: 16px;
-            }
-            ol {
-                color: #34495e;
-                line-height: 1.8;
-                font-size: 16px;
-            }
-            li {
-                margin: 15px 0;
-                font-size: 16px;
-            }
-            .paper-title {
-                color: #2980b9;
-                font-weight: bold;
-                font-size: 20px;
-            }
-            .relevance {
-                color: #e74c3c;
-                font-style: italic;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            .abstract, .analysis {
-                margin-left: 25px;
-                color: #2c3e50;
-                font-size: 16px;
-                line-height: 1.8;
-            }
-        </style>
+    <style>
+      .summary-wrapper {
+        border-radius: 16px;
+        padding: 24px 28px;
+        background: linear-gradient(135deg, rgba(66,133,244,0.12), rgba(219,68,55,0.08));
+        box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
+        margin-bottom: 32px;
+        font-family: 'Helvetica Neue', Arial, sans-serif;
+      }
+      .summary-section {
+        margin-bottom: 24px;
+      }
+      .summary-section h2 {
+        margin: 0 0 12px 0;
+        font-size: 22px;
+        color: #1f2937;
+        border-bottom: 2px solid rgba(59,130,246,0.2);
+        padding-bottom: 8px;
+      }
+      .summary-section p {
+        margin: 0;
+        line-height: 1.7;
+        color: #374151;
+        font-size: 15px;
+      }
+      .summary-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 16px;
+      }
+      .summary-item {
+        padding: 16px 18px;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.85);
+        border: 1px solid rgba(229, 231, 235, 0.8);
+      }
+      .summary-item__header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .summary-item__title {
+        font-size: 17px;
+        font-weight: 600;
+        color: #1d4ed8;
+        margin: 0;
+      }
+      .summary-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.12);
+        color: #1d4ed8;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      .summary-item p {
+        margin: 10px 0 0 0;
+        color: #4b5563;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .summary-item strong {
+        color: #111827;
+      }
+    </style>
     """
-    summary = summary.replace("</head>", f"{style}</head>")
-    return summary
+    return f"{style}\n<div class=\"summary-wrapper\">\n{content}\n</div>"
+
+
+def render_summary_sections(summary_data: dict) -> str:
+    """Convert structured summary data into formatted HTML block."""
+    trend_summary = summary_data.get("trend_summary", "暂无趋势信息")
+    additional_observation = summary_data.get("additional_observation", "暂无")
+
+    recommendations = summary_data.get("recommendations", [])
+    recommendations_html = []
+    if isinstance(recommendations, list):
+        for item in recommendations:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title")
+            if not title:
+                continue
+            relevance = item.get("relevance_label", "相关性未知")
+            reason = item.get("recommend_reason", "未提供推荐理由")
+            contribution = item.get("key_contribution", "未提供关键贡献")
+            recommendations_html.append(
+                "  <li class=\"summary-item\">\n"
+                "    <div class=\"summary-item__header\">"
+                f"<span class=\"summary-item__title\">{title}</span>"
+                f"<span class=\"summary-pill\">{relevance}</span></div>\n"
+                f"    <p><strong>推荐理由：</strong>{reason}</p>\n"
+                f"    <p><strong>关键贡献：</strong>{contribution}</p>\n"
+                "  </li>"
+            )
+
+    sections = [
+        "<div class=\"summary-section\">",
+        "  <h2>今日研究趋势</h2>",
+        f"  <p>{trend_summary}</p>",
+        "</div>",
+        "<div class=\"summary-section\">",
+        "  <h2>重点推荐</h2>",
+    ]
+    if recommendations_html:
+        sections.append("  <ol class=\"summary-list\">")
+        sections.extend(recommendations_html)
+        sections.append("  </ol>")
+    else:
+        sections.append("  <p>暂无推荐。</p>")
+    sections.append("</div>")
+    sections.extend(
+        [
+            "<div class=\"summary-section\">",
+            "  <h2>补充观察</h2>",
+            f"  <p>{additional_observation}</p>",
+            "</div>",
+        ]
+    )
+
+    final_html = "\n".join(sections)
+    return get_summary_html(final_html)
 
 
 def get_block_html(title: str, rate: str, arxiv_id: str, abstract: str, pdf_url: str):
@@ -182,7 +263,7 @@ def send_email(
     msg = MIMEText(html, "html", "utf-8")
     msg["From"] = _format_addr("Github Action <%s>" % sender)
     msg["To"] = _format_addr("You <%s>" % receiver)
-    today = datetime.datetime.now().strftime("%Y/%m/%d")
+    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
     msg["Subject"] = Header(f"Daily arXiv {today}", "utf-8").encode()
 
     try:

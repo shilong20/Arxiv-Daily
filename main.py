@@ -94,7 +94,7 @@ if __name__ == "__main__":
         args.description,
         args.num_workers,
         args.temperature,
-        save_dir=args.save_dir,
+        args.save_dir,
     )
 
     arxiv_daily.send_email(

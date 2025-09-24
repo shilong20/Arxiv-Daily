@@ -35,6 +35,13 @@
 
 1. Run `git clone https://github.com/JoeLeelyf/customize-arxiv-daily.git`
 2. Run `pip install -r requirements.txt` to install necessary packages.
+   If you prefer using [`uv`](https://github.com/astral-sh/uv) for dependency management, run:
+
+   ```bash
+   uv sync
+   ```
+
+   This will create the virtual environment described by `pyproject.toml` and `uv.lock`.
 3. Get your STMP server. Common STMP service provider includes [QQ mail box](https://service.mail.qq.com/detail/0/427)
 4. Describe the research fields you're interested in, and the fields you're not. Edit the `description.txt`. For, example:
 
@@ -107,6 +114,24 @@ python main.py --categories cs.CV cs.AI\
 bash main_gpt.sh
 bash main_silicon_flow.sh
 bash main_ollama.sh
+```
+
+
+### Run with uv
+
+After syncing dependencies you can execute the CLI through `uv run` (it will reuse the managed environment):
+
+```bash
+uv run python main.py --categories cs.CV cs.AI \
+    --provider OpenAI --model gpt-4o \
+    --base_url https://api.openai.com/v1 --api_key * \
+    --smtp_server smtp.qq.com --smtp_port 465 \
+    --sender * --receiver * \
+    --sender_password * \
+    --num_workers 16 \
+    --title "Daily arXiv" \
+    --temperature 0.7 \
+    --save
 ```
 
 7. \* **Run automatically everyday.** For example, use `crontab` on Linux to run the script periodically:

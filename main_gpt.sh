@@ -12,6 +12,7 @@ cd "$(dirname "$0")"
 #
 
 uv run python main.py --categories cs.CV cs.AI \
+  --max_entries 200 \
   --base_url "https://api-inference.modelscope.cn/v1" \
   --api_key "${MODELSCOPE_API_KEY:-*}" \
   --model "deepseek-ai/DeepSeek-V3.2" \
@@ -21,14 +22,15 @@ uv run python main.py --categories cs.CV cs.AI \
   --smtp_server smtp.qq.com --smtp_port 465 \
   --sender "${SMTP_SENDER:-*}" --receiver "${SMTP_RECEIVER:-*}" \
   --sender_password "${SMTP_PASSWORD:-*}" \
-  --lookback_hours 72 \
+  --lookback_hours 96 \
   --include_keywords diffusion flow \
   --exclude_keywords workflow workflows \
   --include_mode any \
+  --seen_db "state/seen_ids.json" --seen_retention_days 30 --seen_scope base \
   --llm_batch_size 5 \
   --weight_topic 0.45 --weight_method 0.25 --weight_novelty 0.15 --weight_impact 0.15 \
   --rerank_top_m 30 \
-  --num_workers 5 \
+  --num_workers 10 \
   --temperature 0.7 \
   --title "Daily arXiv" \
   --description "description.txt" \

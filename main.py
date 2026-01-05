@@ -72,6 +72,25 @@ if __name__ == "__main__":
         help="最终全局重排的候选集大小（Top-M，默认 30；设为 0 可关闭）。",
     )
     parser.add_argument(
+        "--seen_db",
+        type=str,
+        default="state/seen_ids.json",
+        help="已处理论文 ID 的持久化文件路径（用于长窗口去重；默认 state/seen_ids.json；设为空字符串可关闭）。",
+    )
+    parser.add_argument(
+        "--seen_retention_days",
+        type=int,
+        default=30,
+        help="seen_db 仅保留最近 N 天记录（默认 30）。",
+    )
+    parser.add_argument(
+        "--seen_scope",
+        type=str,
+        default="base",
+        choices=["base", "version"],
+        help="seen_db 的 ID 粒度：base=去掉 v1/v2 后缀；version=保留版本号。",
+    )
+    parser.add_argument(
         "--model",
         nargs="+",
         type=str,
@@ -158,6 +177,9 @@ if __name__ == "__main__":
         args.weight_novelty,
         args.weight_impact,
         args.rerank_top_m,
+        args.seen_db.strip() if args.seen_db else None,
+        args.seen_retention_days,
+        args.seen_scope,
         args.model,
         args.base_url,
         args.api_key,

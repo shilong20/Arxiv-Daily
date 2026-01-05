@@ -1,0 +1,50 @@
+name: arxiv-daily
+
+on:
+  schedule:
+    # 北京时间 06:00（GitHub Actions cron 使用 UTC；06:00 CST = 前一日 22:00 UTC）
+    - cron: "0 22 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run daily pipeline
+        env:
+          MODELSCOPE_API_KEY: ${{ secrets.MODELSCOPE_API_KEY }}
+          SMTP_SENDER: ${{ secrets.SMTP_SENDER }}
+          SMTP_RECEIVER: ${{ secrets.SMTP_RECEIVER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: bash main_gpt.sh
+
+      - name: Commit seen_ids back to repo
+        run: |
+          if git diff --quiet -- state/seen_ids.json; then
+            echo "No changes in state/seen_ids.json"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/seen_ids.json
+          git commit -m "chore: update seen_ids"
+          git push

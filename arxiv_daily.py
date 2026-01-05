@@ -13,6 +13,9 @@ from email.utils import parseaddr, formataddr
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from loguru import logger
+from pathlib import Path
+
+from util.seen_db import SeenDb, normalize_arxiv_id
 
 
 class ArxivDaily:
@@ -31,6 +34,9 @@ class ArxivDaily:
         weight_novelty: float,
         weight_impact: float,
         rerank_top_m: int,
+        seen_db_path: str | None,
+        seen_retention_days: int,
+        seen_scope: str,
         model: str,
         base_url: None,
         api_key: None,
@@ -60,6 +66,18 @@ class ArxivDaily:
             "impact": float(weight_impact),
         }
         self.rerank_top_m = max(0, int(rerank_top_m))
+        self.seen_db: SeenDb | None = None
+        if seen_db_path:
+            base_dir = Path(__file__).resolve().parent
+            seen_path = Path(seen_db_path)
+            if not seen_path.is_absolute():
+                seen_path = base_dir / seen_path
+            self.seen_db = SeenDb(
+                path=seen_path,
+                scope=seen_scope,
+                retention_days=int(seen_retention_days),
+            )
+            self.seen_db.prune(now_utc=self.run_datetime)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_dir = None
         if save_dir:
@@ -90,6 +108,7 @@ class ArxivDaily:
 
         self.description = description
         self.lock = threading.Lock()  # 添加线程锁
+        self._last_scored_ids: list[str] = []
 
     def _clean_model_response(self, raw_text: str) -> str:
         cleaned = (raw_text or "").strip()
@@ -376,14 +395,29 @@ class ArxivDaily:
                 time.sleep(1)
 
     def get_recommendation(self):
-        recommendations = {}
+        recommendations: dict[str, dict] = {}
         for category, papers in self.papers.items():
             for paper in papers:
                 recommendations[paper["arXiv_id"]] = paper
 
-        print(
-            f"Got {len(recommendations)} non-overlapping papers from recent arXiv."
-        )
+        deduped_count = len(recommendations)
+        print(f"Got {deduped_count} non-overlapping papers from recent arXiv.")
+
+        # 过滤已处理过的论文（用于“4 天窗口”每天运行一次，避免重复调用 LLM/重复发邮件）
+        if self.seen_db:
+            seen = self.seen_db.load()
+            filtered: dict[str, dict] = {}
+            skipped = 0
+            for paper in recommendations.values():
+                norm_id = normalize_arxiv_id(paper["arXiv_id"], self.seen_db.scope)
+                if norm_id in seen:
+                    skipped += 1
+                    continue
+                filtered[paper["arXiv_id"]] = paper
+            recommendations = filtered
+            print(
+                f"Seen filter enabled: skipped {skipped}, remaining {len(recommendations)} (scope={self.seen_db.scope}, retention_days={self.seen_db.retention_days})."
+            )
 
         cached_results: list[dict] = []
         pending: list[dict] = []
@@ -396,7 +430,10 @@ class ArxivDaily:
 
         recommendations_: list[dict] = []
         recommendations_.extend(cached_results)
-        print("Performing LLM inference...")
+        if pending:
+            print(f"Performing LLM inference for {len(pending)} new papers...")
+        else:
+            print("No new papers to process (after seen filter).")
 
         with ThreadPoolExecutor(self.num_workers) as executor:
             futures = []
@@ -414,9 +451,16 @@ class ArxivDaily:
                 if batch_results:
                     recommendations_.extend(batch_results)
 
-        recommendations_ = sorted(
+        # 记录本次“成功得到 LLM 结果/缓存结果”的论文，用于发送成功后写入 seen_db
+        self._last_scored_ids = [
+            p.get("arXiv_id", "") for p in recommendations_ if p.get("arXiv_id")
+        ]
+
+        # 按分数排序后再截断到 Top-N（邮件正文仍会展示 Top-N；邮件开头固定展示 Top-5）
+        recommendations_sorted = sorted(
             recommendations_, key=lambda x: x.get("relevance_score", 0), reverse=True
-        )[: self.max_paper_num]
+        )
+        recommendations_ = recommendations_sorted[: self.max_paper_num]
 
         # Top-M 全局重排（用于减少同分与纠偏）
         if self.rerank_top_m > 0 and len(recommendations_) > 1:
@@ -566,6 +610,17 @@ class ArxivDaily:
         server.sendmail(sender, receivers, msg.as_string())
         server.quit()
 
+        # 仅当邮件发送成功后，才更新 seen_db（避免发送失败导致“标记已处理却未通知”）
+        if self.seen_db:
+            try:
+                self.seen_db.prune(now_utc=self.run_datetime)
+                self.seen_db.mark_processed(self._last_scored_ids, now_utc=self.run_datetime)
+                self.seen_db.prune(now_utc=self.run_datetime)
+                self.seen_db.save()
+                print(f"seen_db updated: {self.seen_db.path} (+{len(self._last_scored_ids)} ids)")
+            except Exception as e:
+                logger.warning(f"Failed to update seen_db: {e}")
+
 
 if __name__ == "__main__":
     categories = ["cs.CV"]
@@ -610,6 +665,9 @@ if __name__ == "__main__":
         weight_novelty,
         weight_impact,
         30,
+        "state/seen_ids.json",
+        30,
+        "base",
         model,
         base_url,
         api_key,

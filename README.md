@@ -108,19 +108,18 @@ uv run python main.py --categories cs.CV cs.AI \
     --save
 ```
 
-7. \* **Run automatically everyday.** For example, use `crontab` on Linux to run the script periodically:
+7. \* **Run automatically everyday (GitHub Actions recommended).**
 
-- Edit `crontab` file:
+This repo is designed to run daily with a **longer window** (e.g. last 4 days) + a persistent `seen_ids` database to avoid re-processing/re-emailing papers:
 
-```bash
-crontab -e
-```
+- Window: `--lookback_hours 96` (covers weekend backlog)
+- Seen DB: `--seen_db state/seen_ids.json --seen_retention_days 30 --seen_scope base`
 
-- Add following line and run the script in 5:00 AM everyday (anytime you want):
+Create GitHub Secrets:
+- `MODELSCOPE_API_KEY` (or your OpenAI-compatible API key)
+- `SMTP_SENDER`, `SMTP_RECEIVER`, `SMTP_PASSWORD`
 
-```txt
-* 5 * * * /path/to/customize-arxiv-daily/main_gpt.sh
-```
+Then enable the workflow file: `.github/workflows/daily.yml` (it runs `bash main_gpt.sh` and commits the updated `state/seen_ids.json` back to the repo).
 
 8. \* **Adjust and customize your LLM prompt.** Edit `_build_batch_prompt(...)` / `_build_rerank_prompt(...)` in `arxiv_daily.py`.
 
@@ -166,7 +165,8 @@ crontab -e
 - `--temperature`：LLM 采样温度。越高输出越“发散”，相关性评分与摘要稳定性越差；越低更稳定但可能更“保守”。
 - `--weight_topic/--weight_method/--weight_novelty/--weight_impact`：多维度评分的加权系数（总分由四项加权得到，默认 `0.45/0.25/0.15/0.15`）。
 - `--rerank_top_m`：最终对 Top-M 候选做一次“全局比较式重排”（默认 `30`，输入为 title+abstract）。用于减少同分与纠偏；设为 `0` 可关闭。
-- `--base_url/--api_key`：支持传入多个 endpoint（空格分隔）。当一次请求报错时会按列表顺序自动切换到下一个 endpoint。
+- `--base_url/--api_key/--model`：支持传入多个值（空格分隔）。当一次请求报错时会按列表顺序自动切换到下一个（可组成 base_url+api_key+model 的三元组列表；当 model 为列表时，会优先按三元组顺序切换）。
+- `--seen_db/--seen_retention_days/--seen_scope`：长窗口模式下的“已处理论文 ID”去重机制。推荐 `--lookback_hours 96` + `--seen_retention_days 30` 覆盖周末堆积，同时避免重复处理/重复发邮件。
 
 ### 运行机制补充（便于理解上述参数的影响）
 

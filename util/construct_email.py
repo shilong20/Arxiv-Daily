@@ -137,7 +137,6 @@ def get_summary_html(content: str) -> str:
 
 def render_summary_sections(summary_data: dict) -> str:
     """Convert structured summary data into formatted HTML block."""
-    trend_summary = summary_data.get("trend_summary", "暂无趋势信息")
     additional_observation = summary_data.get("additional_observation", "暂无")
 
     recommendations = summary_data.get("recommendations", [])
@@ -164,10 +163,6 @@ def render_summary_sections(summary_data: dict) -> str:
 
     sections = [
         "<div class=\"summary-section\">",
-        "  <h2>今日研究趋势</h2>",
-        f"  <p>{trend_summary}</p>",
-        "</div>",
-        "<div class=\"summary-section\">",
         "  <h2>重点推荐</h2>",
     ]
     if recommendations_html:
@@ -177,14 +172,15 @@ def render_summary_sections(summary_data: dict) -> str:
     else:
         sections.append("  <p>暂无推荐。</p>")
     sections.append("</div>")
-    sections.extend(
-        [
-            "<div class=\"summary-section\">",
-            "  <h2>补充观察</h2>",
-            f"  <p>{additional_observation}</p>",
-            "</div>",
-        ]
-    )
+    if additional_observation and str(additional_observation).strip() not in ("暂无", "无", "none", "None"):
+        sections.extend(
+            [
+                "<div class=\"summary-section\">",
+                "  <h2>补充说明</h2>",
+                f"  <p>{additional_observation}</p>",
+                "</div>",
+            ]
+        )
 
     final_html = "\n".join(sections)
     return get_summary_html(final_html)
@@ -255,24 +251,26 @@ def send_email(
     smtp_server: str,
     smtp_port: int,
     html: str,
+    from_name: str = "arxiv-daily",
 ):
     def _format_addr(s):
         name, addr = parseaddr(s)
         return formataddr((Header(name, "utf-8").encode(), addr))
 
     msg = MIMEText(html, "html", "utf-8")
-    msg["From"] = _format_addr("Github Action <%s>" % sender)
+    msg["From"] = _format_addr(f"{from_name} <%s>" % sender)
     msg["To"] = _format_addr("You <%s>" % receiver)
     today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
     msg["Subject"] = Header(f"Daily arXiv {today}", "utf-8").encode()
 
-    try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-    except Exception as e:
-        logger.warning(f"Failed to use TLS. {e}")
-        logger.warning(f"Try to use SSL.")
+    if smtp_port == 465:
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+    else:
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        try:
+            server.starttls()
+        except Exception as e:
+            logger.warning(f"Failed to use STARTTLS. {e}")
 
     server.login(sender, password)
     server.sendmail(sender, [receiver], msg.as_string())

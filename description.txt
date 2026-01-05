@@ -1,10 +1,14 @@
-I am working on the research area of computer vision and natural language processing. 
-Specifically, I am interested in the following fieds:
-1. Object detection
-2. AIGC (AI Generated Content)
-3. Multimodal Large Language Models
+我的研究方向是计算机视觉（Computer Vision）中的生成式建模，核心关注扩散模型（Diffusion Models）与流模型（Flow Models，例如 Rectified Flow、Normalizing Flow）。
 
-I'm not interested in the following fields:
-1. 3D Vision
-2. Robotics
-3. Low-level Vision
+我特别感兴趣的主题（出现这些内容时应提高相关性评分）：
+1. 扩散/流模型的新架构与训练目标
+2. 采样与加速：少步采样、蒸馏、强化学习、后训练
+3. 引导机制的研究：类似CFG等不需要训练的引导机制的解析和改进
+4. 理论与分析：对扩散/流模型泛化性、收敛性的分析
+5. 基于扩散/流模型的下游任务（如线性/非线性反问题求解）
+
+我不感兴趣的主题（出现这些内容时应显著降低相关性评分，除非与扩散/流模型的方法贡献直接相关）：
+1. 机器人与具身智能（Robotics/Embodied AI）
+2. 低层视觉（Low-level Vision，如去噪/去模糊/超分等传统任务；除非核心贡献是扩散/流模型方法）
+3. 大语言模型与纯 NLP（LLM/NLP；除非与扩散/流模型直接结合且贡献点在生成式建模）
+4. 纯工程堆叠、仅调参或缺乏方法创新的工作

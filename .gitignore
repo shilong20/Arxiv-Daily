@@ -6,3 +6,6 @@ __pycache__
 .env
 .ruff_cache
 arxiv_history
+trash
+AGENTS.md
+mermaid.md

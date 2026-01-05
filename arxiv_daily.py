@@ -1,5 +1,5 @@
 from llm import *
-from util.request import get_yesterday_arxiv_papers
+from util.request import get_recent_arxiv_papers
 from util.construct_email import *
 from tqdm import tqdm
 import json
@@ -12,6 +12,7 @@ from email.header import Header
 from email.utils import parseaddr, formataddr
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from loguru import logger
 
 
 class ArxivDaily:
@@ -20,7 +21,16 @@ class ArxivDaily:
         categories: list[str],
         max_entries: int,
         max_paper_num: int,
-        provider: str,
+        lookback_hours: int,
+        include_keywords: list[str] | None,
+        exclude_keywords: list[str] | None,
+        include_mode: str,
+        llm_batch_size: int,
+        weight_topic: float,
+        weight_method: float,
+        weight_novelty: float,
+        weight_impact: float,
+        rerank_top_m: int,
         model: str,
         base_url: None,
         api_key: None,
@@ -38,12 +48,34 @@ class ArxivDaily:
         self.temperature = temperature
         self.run_datetime = datetime.now(timezone.utc)
         self.run_date = self.run_datetime.strftime("%Y-%m-%d")
+        self.lookback_hours = lookback_hours
+        self.include_keywords = include_keywords
+        self.exclude_keywords = exclude_keywords
+        self.include_mode = include_mode
+        self.llm_batch_size = max(1, int(llm_batch_size))
+        self.score_weights = {
+            "topic": float(weight_topic),
+            "method": float(weight_method),
+            "novelty": float(weight_novelty),
+            "impact": float(weight_impact),
+        }
+        self.rerank_top_m = max(0, int(rerank_top_m))
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.cache_dir = os.path.join(base_dir, save_dir, self.run_date,"json")
-        os.makedirs(self.cache_dir, exist_ok=True)
+        self.cache_dir = None
+        if save_dir:
+            self.cache_dir = os.path.join(base_dir, save_dir, self.run_date, "json")
+            os.makedirs(self.cache_dir, exist_ok=True)
         self.papers = {}
         for category in categories:
-            self.papers[category] = get_yesterday_arxiv_papers(category, max_entries)
+            self.papers[category] = get_recent_arxiv_papers(
+                category=category,
+                max_results=max_entries,
+                lookback_hours=self.lookback_hours,
+                now_utc=self.run_datetime,
+                include_keywords=self.include_keywords,
+                exclude_keywords=self.exclude_keywords,
+                include_mode=self.include_mode,
+            )
             print(
                 "{} papers on arXiv for {} are fetched.".format(
                     len(self.papers[category]), category
@@ -53,109 +85,295 @@ class ArxivDaily:
             sleep_time = random.randint(5, 15)
             time.sleep(sleep_time)
 
-        provider = provider.lower()
-        if provider == "ollama":
-            self.model = Ollama(model)
-        elif provider == "openai" or provider == "siliconflow":
-            self.model = GPT(model, base_url, api_key)
-        else:
-            assert False, "Model not supported."
-        print(
-            "Model initialized successfully. Using {} provided by {}.".format(
-                model, provider
-            )
-        )
+        self.model = GPT(model, base_url, api_key)
+        print(f"Model initialized successfully. Using {model}.")
 
         self.description = description
         self.lock = threading.Lock()  # 添加线程锁
 
-    def get_response(self, title, abstract):
-        prompt = """
-            你是一个有帮助的学术研究助手，可以帮助我构建每日论文推荐系统。
-            以下是我最近研究领域的描述：
-            {}
-        """.format(self.description)
-        prompt += """
-            以下是我从昨天的 arXiv 爬取的论文，我为你提供了标题和摘要：
-            标题: {}
-            摘要: {}
-        """.format(title, abstract)
-        prompt += """
-            1. 总结这篇论文的主要内容。
-            2. 请评估这篇论文与我研究领域的相关性，并给出 0-10 的评分。其中 0 表示完全不相关，10 表示高度相关。
-            
-            请按以下 JSON 格式给出你的回答：
-            {
-                "summary": <你的总结>,
-                "relevance": <你的评分>
-            }
-            使用中文回答。
-            直接返回上述 JSON 格式，无需任何额外解释。
-        """
+    def _clean_model_response(self, raw_text: str) -> str:
+        cleaned = (raw_text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            if "\n" in cleaned:
+                first_line, rest = cleaned.split("\n", 1)
+                if first_line.strip().lower() in ("json", "html"):
+                    cleaned = rest
+                else:
+                    cleaned = first_line + "\n" + rest
+        return cleaned.strip()
 
-        response = self.model.inference(prompt, temperature=self.temperature)
-        return response
+    def _compute_weighted_score(self, scores: dict) -> float:
+        w = self.score_weights
+        total_w = w["topic"] + w["method"] + w["novelty"] + w["impact"]
+        if total_w <= 0:
+            total_w = 1.0
+        topic = float(scores.get("topic", 0))
+        method = float(scores.get("method", 0))
+        novelty = float(scores.get("novelty", 0))
+        impact = float(scores.get("impact", 0))
+        weighted = (
+            w["topic"] * topic
+            + w["method"] * method
+            + w["novelty"] * novelty
+            + w["impact"] * impact
+        ) / total_w
+        return max(0.0, min(10.0, weighted))
 
-    def process_paper(self, paper, max_retries=5):
-        retry_count = 0
-        cache_path = os.path.join(self.cache_dir, f"{paper['arXiv_id']}.json")
+    @staticmethod
+    def _label_from_score(score: float) -> str:
+        if score >= 8:
+            return "高度相关"
+        if score >= 6:
+            return "相关"
+        if score >= 4:
+            return "一般相关"
+        return "不太相关"
 
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "r", encoding="utf-8") as cache_file:
-                    cached_result = json.load(cache_file)
-                print(f"缓存文件 {cache_path} 读取成功。")
-                return cached_result
-            except (json.JSONDecodeError, OSError) as e:
-                print(f"缓存文件 {cache_path} 读取失败: {e}，将重新获取。")
-
-        while retry_count < max_retries:
-            try:
-                title = paper["title"]
-                abstract = paper["abstract"]
-                response = self.get_response(title, abstract)
-                response = response.strip("```").strip("json")
-                response = json.loads(response)
-                relevance_score = float(response["relevance"])
-                summary = response["summary"]
-                result = {
-                    "title": title,
-                    "arXiv_id": paper["arXiv_id"],
-                    "abstract": abstract,
-                    "summary": summary,
-                    "relevance_score": relevance_score,
-                    "pdf_url": paper["pdf_url"],
+    def _build_batch_prompt(self, papers: list[dict]) -> str:
+        weights = self.score_weights
+        weights_text = (
+            f"topic={weights['topic']}, method={weights['method']}, "
+            f"novelty={weights['novelty']}, impact={weights['impact']}"
+        )
+        items = []
+        for p in papers:
+            items.append(
+                {
+                    "arXiv_id": p.get("arXiv_id"),
+                    "title": p.get("title"),
+                    "abstract": p.get("abstract"),
                 }
-                try:
-                    with self.lock:
-                        with open(cache_path, "w", encoding="utf-8") as cache_file:
-                            json.dump(result, cache_file, ensure_ascii=False, indent=2)
-                except OSError as write_error:
-                    print(f"写入缓存 {cache_path} 时失败: {write_error}")
-                return result
-            except Exception as e:
-                retry_count += 1
-                print(f"处理论文 {paper['arXiv_id']} 时发生错误: {e}")
-                print(f"正在进行第 {retry_count} 次重试...")
-                if retry_count == max_retries:
-                    print(f"已达到最大重试次数 {max_retries}，放弃处理论文{paper['arXiv_id']}")
-                    # 处理失败，返回特殊结果
-                    result = {
-                        "title": paper["title"],
-                        "arXiv_id": paper["arXiv_id"],
-                        "abstract": paper["abstract"],
-                        "summary": "该论文总结失败",
-                        "relevance_score": 10,
-                        "pdf_url": paper.get("pdf_url", ""),
+            )
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+
+        return f"""
+你是一名严谨的学术研究助手。请只基于我提供的“研究兴趣描述”和每篇论文的“标题/摘要”进行判断，不要臆测论文未提供的实验细节或结论。
+
+研究兴趣描述（包含感兴趣与不感兴趣方向）：
+{self.description}
+
+请对下面每篇论文输出（每篇都要输出）：
+1) summary：用中文写 2-4 句摘要（<=120 字）。
+2) scores：给出 4 个维度的 0-10 整数评分（越高越好）：
+   - topic：主题/任务与我的研究兴趣匹配程度
+   - method：方法/技术路线与我的研究兴趣匹配程度
+   - novelty：新颖性/独特性（只基于摘要可判断的部分）
+   - impact：潜在影响/可用性（对我后续研究的帮助）
+3) recommend_reason：一句话推荐理由（中文）。
+4) key_contribution：一句话关键贡献（中文）。
+
+最终总分由程序按加权评分计算（你不需要计算总分）。权重为：{weights_text}。
+
+输出要求（非常重要）：
+- 只输出一个 JSON 数组（不要 Markdown、不要代码块、不要多余文字）。
+- 数组长度必须与输入论文数一致；每个元素必须包含 arXiv_id 且与输入完全一致。
+- scores.topic / scores.method / scores.novelty / scores.impact 必须为 0-10 的整数。
+- 每个元素必须严格包含如下字段：
+  {{
+    "arXiv_id": "...",
+    "summary": "...",
+    "scores": {{"topic": 0, "method": 0, "novelty": 0, "impact": 0}},
+    "recommend_reason": "...",
+    "key_contribution": "..."
+  }}
+
+输入论文 JSON 数组如下：
+{payload}
+
+请直接输出 JSON 数组。
+""".strip()
+
+    def _load_cache(self, paper: dict) -> dict | None:
+        if not self.cache_dir:
+            return None
+        cache_path = os.path.join(self.cache_dir, f"{paper['arXiv_id']}.json")
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                return json.load(cache_file)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"缓存文件 {cache_path} 读取失败: {e}，将重新获取。")
+            return None
+
+    def _write_cache(self, result: dict) -> None:
+        if not self.cache_dir:
+            return
+        cache_path = os.path.join(self.cache_dir, f"{result['arXiv_id']}.json")
+        try:
+            with self.lock:
+                with open(cache_path, "w", encoding="utf-8") as cache_file:
+                    json.dump(result, cache_file, ensure_ascii=False, indent=2)
+        except OSError as write_error:
+            print(f"写入缓存 {cache_path} 时失败: {write_error}")
+
+    def process_paper_batch(self, papers: list[dict], max_retries: int = 3) -> list[dict]:
+        for attempt in range(1, max_retries + 1):
+            try:
+                prompt = self._build_batch_prompt(papers)
+                raw = self.model.inference(prompt, temperature=self.temperature)
+                cleaned = self._clean_model_response(raw)
+                data = json.loads(cleaned)
+                if not isinstance(data, list) or len(data) != len(papers):
+                    raise ValueError("LLM 输出不是等长 JSON 数组")
+
+                results_by_id: dict[str, dict] = {}
+                for item in data:
+                    if not isinstance(item, dict):
+                        raise ValueError("LLM 输出数组元素不是对象")
+                    arxiv_id = item.get("arXiv_id")
+                    if not arxiv_id or not isinstance(arxiv_id, str):
+                        raise ValueError("LLM 输出缺少 arXiv_id")
+                    scores = item.get("scores", {})
+                    if not isinstance(scores, dict):
+                        raise ValueError("scores 字段不是对象")
+                    parsed_scores = {
+                        "topic": int(scores.get("topic", 0)),
+                        "method": int(scores.get("method", 0)),
+                        "novelty": int(scores.get("novelty", 0)),
+                        "impact": int(scores.get("impact", 0)),
                     }
-                    try:
-                        with self.lock:
-                            with open(cache_path, "w", encoding="utf-8") as cache_file:
-                                json.dump(result, cache_file, ensure_ascii=False, indent=2)
-                    except OSError as write_error:
-                        print(f"写入缓存 {cache_path} 时失败: {write_error}")
-                    return result
-                time.sleep(1)  # 重试前等待1秒
+                    for k, v in parsed_scores.items():
+                        if v < 0 or v > 10:
+                            raise ValueError(f"{k} 评分超出范围")
+                    results_by_id[arxiv_id] = {
+                        "summary": str(item.get("summary", "")).strip(),
+                        "scores": parsed_scores,
+                        "recommend_reason": str(item.get("recommend_reason", "")).strip(),
+                        "key_contribution": str(item.get("key_contribution", "")).strip(),
+                    }
+
+                results: list[dict] = []
+                for paper in papers:
+                    arxiv_id = paper["arXiv_id"]
+                    if arxiv_id not in results_by_id:
+                        raise ValueError(f"LLM 输出缺少论文 {arxiv_id}")
+                    r = results_by_id[arxiv_id]
+                    score = self._compute_weighted_score(r["scores"])
+                    result = {
+                        "title": paper.get("title", ""),
+                        "arXiv_id": arxiv_id,
+                        "abstract": paper.get("abstract", ""),
+                        "summary": r["summary"],
+                        "relevance_score": score,
+                        "relevance_label": self._label_from_score(score),
+                        "recommend_reason": r["recommend_reason"] or "未提供推荐理由",
+                        "key_contribution": r["key_contribution"] or "未提供关键贡献",
+                        "pdf_url": paper.get("pdf_url", ""),
+                        "scores": r["scores"],
+                    }
+                    self._write_cache(result)
+                    results.append(result)
+                return results
+            except Exception as e:
+                print(f"批处理 LLM 推理第 {attempt} 次失败: {e}")
+                if attempt == max_retries:
+                    return []
+                time.sleep(1)
+
+    def _build_rerank_prompt(self, papers: list[dict]) -> str:
+        items = []
+        for p in papers:
+            items.append(
+                {
+                    "arXiv_id": p.get("arXiv_id"),
+                    "title": p.get("title"),
+                    "abstract": p.get("abstract"),
+                }
+            )
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+        return f"""
+你是一名严谨的学术研究助手。请只基于我提供的“研究兴趣描述”和每篇论文的“标题/摘要”进行判断，不要臆测论文未提供的实验细节或结论。
+
+研究兴趣描述（包含感兴趣与不感兴趣方向）：
+{self.description}
+
+任务：请对下面这批论文做“全局比较式”的最终排序（从最值得我优先阅读到最不值得），并给出更细粒度的最终分数用于区分同分与纠偏。
+
+输出要求（非常重要）：
+- 只输出一个 JSON 数组（不要 Markdown、不要代码块、不要多余文字）。
+- 数组必须覆盖输入中的全部论文，且每篇论文只出现一次。
+- 每个元素必须严格包含如下字段：
+  {{
+    "arXiv_id": "...",
+    "score_100": 0,
+    "reason": "..."
+  }}
+- score_100 为 0-100 的整数，越高越优先；请尽量避免大量相同分数（必要时可使用相邻分数）。
+- reason 用中文一句话说明排序原因（<=40 字）。
+
+输入论文 JSON 数组如下：
+{payload}
+
+请直接输出 JSON 数组。
+""".strip()
+
+    def rerank_top_papers(self, papers: list[dict], max_retries: int = 2) -> list[dict]:
+        if len(papers) <= 1:
+            return papers
+        for attempt in range(1, max_retries + 1):
+            try:
+                prompt = self._build_rerank_prompt(papers)
+                raw = self.model.inference(prompt, temperature=self.temperature)
+                cleaned = self._clean_model_response(raw)
+                data = json.loads(cleaned)
+                if not isinstance(data, list) or len(data) != len(papers):
+                    raise ValueError("重排输出不是等长 JSON 数组")
+
+                expected_ids = [p.get("arXiv_id") for p in papers]
+                expected_set = set(expected_ids)
+                if None in expected_set:
+                    raise ValueError("输入论文缺少 arXiv_id")
+
+                seen: set[str] = set()
+                ranked: list[dict] = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        raise ValueError("重排数组元素不是对象")
+                    arxiv_id = item.get("arXiv_id")
+                    if not arxiv_id or not isinstance(arxiv_id, str):
+                        raise ValueError("重排输出缺少 arXiv_id")
+                    if arxiv_id in seen:
+                        raise ValueError("重排输出存在重复 arXiv_id")
+                    if arxiv_id not in expected_set:
+                        raise ValueError(f"重排输出包含未知论文 {arxiv_id}")
+                    score_100 = int(item.get("score_100", 0))
+                    if score_100 < 0 or score_100 > 100:
+                        raise ValueError("score_100 超出范围")
+                    reason = str(item.get("reason", "")).strip()
+                    seen.add(arxiv_id)
+                    ranked.append(
+                        {
+                            "arXiv_id": arxiv_id,
+                            "score_100": score_100,
+                            "reason": reason,
+                        }
+                    )
+
+                if seen != expected_set:
+                    missing = expected_set - seen
+                    raise ValueError(f"重排输出缺少论文：{sorted(missing)}")
+
+                by_id = {p["arXiv_id"]: p for p in papers}
+                out: list[dict] = []
+                for idx, r in enumerate(ranked, start=1):
+                    p = by_id[r["arXiv_id"]]
+                    p["rerank_score_100"] = r["score_100"]
+                    p["rerank_reason"] = r["reason"]
+                    p["rerank_rank"] = idx
+                    # 统一使用 0-10 的 relevance_score 继续后续排序/展示
+                    p["relevance_score"] = float(r["score_100"]) / 10.0
+                    out.append(p)
+                return out
+            except Exception as e:
+                print(f"Top-M 重排第 {attempt} 次失败: {e}")
+                if attempt == max_retries:
+                    return papers
+                time.sleep(1)
 
     def get_recommendation(self):
         recommendations = {}
@@ -164,208 +382,133 @@ class ArxivDaily:
                 recommendations[paper["arXiv_id"]] = paper
 
         print(
-            f"Got {len(recommendations)} non-overlapping papers from yesterday's arXiv."
+            f"Got {len(recommendations)} non-overlapping papers from recent arXiv."
         )
 
-        recommendations_ = []
+        cached_results: list[dict] = []
+        pending: list[dict] = []
+        for paper in recommendations.values():
+            cached = self._load_cache(paper)
+            if cached:
+                cached_results.append(cached)
+            else:
+                pending.append(paper)
+
+        recommendations_: list[dict] = []
+        recommendations_.extend(cached_results)
         print("Performing LLM inference...")
 
         with ThreadPoolExecutor(self.num_workers) as executor:
             futures = []
-            for arXiv_id, paper in recommendations.items():
-                futures.append(executor.submit(self.process_paper, paper))
+            batch_size = self.llm_batch_size
+            for i in range(0, len(pending), batch_size):
+                batch = pending[i : i + batch_size]
+                futures.append(executor.submit(self.process_paper_batch, batch))
             for future in tqdm(
                 as_completed(futures),
                 total=len(futures),
-                desc="Processing papers",
-                unit="paper",
+                desc="Processing batches",
+                unit="batch",
             ):
-                result = future.result()
-                if result:
-                    recommendations_.append(result)
+                batch_results = future.result()
+                if batch_results:
+                    recommendations_.extend(batch_results)
 
         recommendations_ = sorted(
-            recommendations_, key=lambda x: x["relevance_score"], reverse=True
+            recommendations_, key=lambda x: x.get("relevance_score", 0), reverse=True
         )[: self.max_paper_num]
 
+        # Top-M 全局重排（用于减少同分与纠偏）
+        if self.rerank_top_m > 0 and len(recommendations_) > 1:
+            for p in recommendations_:
+                if "base_relevance_score" not in p:
+                    p["base_relevance_score"] = p.get("relevance_score", 0)
+            m = min(self.rerank_top_m, len(recommendations_))
+            top = recommendations_[:m]
+            tail = recommendations_[m:]
+            reranked_top = self.rerank_top_papers(top)
+            recommendations_ = reranked_top + tail
+            recommendations_ = sorted(
+                recommendations_, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )[: self.max_paper_num]
+
         # Save recommendation to markdown file
-        current_time = self.run_datetime
-        save_path = os.path.join(
-            self.save_dir, self.run_date, f"{current_time.strftime('%Y-%m-%d')}.md"
-        )
-        with open(save_path, "w") as f:
-            f.write("# Daily arXiv Papers\n")
-            f.write(f"## Date: {current_time.strftime('%Y-%m-%d')}\n")
-            f.write(f"## Description: {self.description}\n")
-            f.write("## Papers:\n")
-            for i, paper in enumerate(recommendations_):
-                f.write(f"### {i + 1}. {paper['title']}\n")
-                f.write(f"#### Abstract:\n")
-                f.write(f"{paper['abstract']}\n")
-                f.write(f"#### Summary:\n")
-                f.write(f"{paper['summary']}\n")
-                f.write(f"#### Relevance Score: {paper['relevance_score']}\n")
-                f.write(f"#### PDF URL: {paper['pdf_url']}\n")
-                f.write("\n")
+        if self.save_dir:
+            current_time = self.run_datetime
+            save_path = os.path.join(
+                self.save_dir, self.run_date, f"{current_time.strftime('%Y-%m-%d')}.md"
+            )
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write("# Daily arXiv Papers\n")
+                f.write(f"## Date: {current_time.strftime('%Y-%m-%d')}\n")
+                f.write(f"## Description: {self.description}\n")
+                f.write("## Papers:\n")
+                for i, paper in enumerate(recommendations_):
+                    f.write(f"### {i + 1}. {paper.get('title','')}\n")
+                    f.write("#### Abstract:\n")
+                    f.write(f"{paper.get('abstract','')}\n")
+                    f.write("#### Summary:\n")
+                    f.write(f"{paper.get('summary','')}\n")
+                    f.write(f"#### Relevance Score: {paper.get('relevance_score',0)}\n")
+                    f.write(f"#### PDF URL: {paper.get('pdf_url','')}\n")
+                    f.write("\n")
 
         return recommendations_
 
     def summarize(self, recommendations):
-        overview = ""
-        for i in range(len(recommendations)):
-            overview += f"{i + 1}. {recommendations[i]['title']} - {recommendations[i]['summary']} \n"
-        prompt_context = """
-            你是一个有帮助的学术研究助手，可以帮助我构建每日论文推荐系统。
-            以下是我最近研究领域的描述：
-            {}
-        """.format(self.description)
-        papers_context = """
-            以下是我从昨天的 arXiv 爬取的论文，我为你提供了标题和摘要：
-            {}
-        """.format(overview)
-        json_instruction = """
-            请务必严格按照以下 JSON 结构返回内容，不要添加额外文本或代码块：
-            {{
-              "trend_summary": "<总体趋势，用中文,使用 html 的语法，不要使用 markdown 的语法>",
-              "recommendations": [
-                {{
-                  "title": "<论文标题>",
-                  "relevance_label": "<高度相关/相关/一般相关>",
-                  "recommend_reason": "<为什么值得我读>",
-                  "key_contribution": "<一句话概括论文关键贡献>"
-                }}
-              ],
-              "additional_observation": "<补充观察，若无请写‘暂无’>"
-            }}
+        recommendations = sorted(
+            recommendations, key=lambda x: x.get("relevance_score", 0), reverse=True
+        )
+        top_k = 5
+        top = recommendations[:top_k]
 
-            任务要求：
-            1. 给出今天论文体现的整体研究趋势，解释其与我研究兴趣的联系。
-            2. 精选最值得我精读的论文（建议返回 3-5 篇，可按实际情况增减），说明推荐理由并突出关键贡献。
-            3. 如有需要持续关注或潜在风险的方向，请在补充观察中说明；若没有请写“暂无”。
-        """
-        html_instruction = """
-            请直接输出一段 HTML 片段，严格遵循以下结构，不要包含 JSON、Markdown 或多余说明：
-            <div class="summary-wrapper">
-              <div class="summary-section">
-                <h2>今日研究趋势</h2>
-                <p>...</p>
-              </div>
-              <div class="summary-section">
-                <h2>重点推荐</h2>
-                <ol class="summary-list">
-                  <li class="summary-item">
-                    <div class="summary-item__header"><span class="summary-item__title">论文标题</span><span class="summary-pill">相关性</span></div>
-                    <p><strong>推荐理由：</strong>...</p>
-                    <p><strong>关键贡献：</strong>...</p>
-                  </li>
-                </ol>
-              </div>
-              <div class="summary-section">
-                <h2>补充观察</h2>
-                <p>暂无或其他补充。</p>
-              </div>
-            </div>
-
-            HTML 要用中文撰写内容，重点推荐部分建议返回 3-5 篇论文，可按实际情况增减，缺少推荐时请写“暂无推荐。”。
-        """
-        prompt = prompt_context + papers_context + json_instruction
-        html_prompt = prompt_context + papers_context + html_instruction
-
-        def _clean_model_response(raw_text: str) -> str:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-                if "\n" in cleaned:
-                    first_line, rest = cleaned.split("\n", 1)
-                    if first_line.strip().lower() in ("json", "html"):
-                        cleaned = rest
-                    else:
-                        cleaned = first_line + "\n" + rest
-            return cleaned.strip()
-
-        max_retries = 1
-        for attempt in range(1, max_retries + 1):
-            try:
-                raw_response = self.model.inference(
-                    prompt, temperature=self.temperature
-                )
-                cleaned = _clean_model_response(raw_response)
-                data = json.loads(cleaned)
-                trend_summary = data.get("trend_summary", "暂无趋势信息")
-                recommendations_data = data.get("recommendations", [])
-                additional_observation = data.get("additional_observation", "暂无")
-
-                if not isinstance(recommendations_data, list):
-                    raise ValueError("recommendations 字段不是列表")
-
-                cleaned_recommendations = []
-                for item in recommendations_data:
-                    title = item.get("title")
-                    if not title:
-                        raise ValueError("recommendations 中存在缺少标题的条目")
-                    cleaned_recommendations.append(
-                        {
-                            "title": title,
-                            "relevance_label": item.get(
-                                "relevance_label", "相关性未知"
-                            ),
-                            "recommend_reason": item.get(
-                                "recommend_reason", "未提供推荐理由"
-                            ),
-                            "key_contribution": item.get(
-                                "key_contribution", "未提供关键贡献"
-                            ),
-                        }
-                    )
-
-                structured_summary = {
-                    "trend_summary": trend_summary,
-                    "recommendations": cleaned_recommendations,
-                    "additional_observation": additional_observation,
+        weights = self.score_weights
+        weight_note = (
+            "总分=加权评分（topic/method/novelty/impact），权重："
+            f"topic={weights['topic']}, method={weights['method']}, "
+            f"novelty={weights['novelty']}, impact={weights['impact']}。"
+        )
+        summary_data = {
+            "recommendations": [
+                {
+                    "title": p.get("title", ""),
+                    "relevance_label": p.get("relevance_label")
+                    or self._label_from_score(float(p.get("relevance_score", 0))),
+                    "recommend_reason": p.get("recommend_reason", "未提供推荐理由"),
+                    "key_contribution": p.get("key_contribution", "未提供关键贡献"),
                 }
-
-                return render_summary_sections(structured_summary)
-            except Exception as error:
-                print(f"总结生成第 {attempt} 次失败: {error}")
-                if attempt == max_retries:
-                    try:
-                        for html_attempt in range(1, max_retries + 1):  
-                            print(f"HTML 回退生成第 {html_attempt} 次...")
-                            raw_html_response = self.model.inference(
-                                html_prompt, temperature=self.temperature
-                            )
-                            cleaned_html = _clean_model_response(raw_html_response)
-                            return cleaned_html
-                    except Exception as html_error:
-                        print(f"HTML 回退生成失败: {html_error}")
-                        fallback_data = {
-                            "trend_summary": "总结生成失败，请稍后重试。",
-                            "recommendations": [],
-                            "additional_observation": "暂无。",
-                        }
-                        return render_summary_sections(fallback_data)
+                for p in top
+            ],
+            "additional_observation": f"每日固定展示评分最高的前 {min(top_k, len(recommendations))} 篇论文；{weight_note}",
+        }
+        return render_summary_sections(summary_data)
 
     def render_email(self, recommendations):
-        save_file_path = os.path.join(self.save_dir, self.run_date, "arxiv_daily_email.html")
-        if os.path.exists(save_file_path):
-            with open(save_file_path, "r", encoding="utf-8") as f:
-                print(f"邮件已渲染，从缓存文件 {save_file_path} 读取邮件。")
-                return f.read()
+        if self.save_dir:
+            save_file_path = os.path.join(
+                self.save_dir, self.run_date, "arxiv_daily_email.html"
+            )
+            if os.path.exists(save_file_path):
+                with open(save_file_path, "r", encoding="utf-8") as f:
+                    print(f"邮件已渲染，从缓存文件 {save_file_path} 读取邮件。")
+                    return f.read()
         parts = []
         if len(recommendations) == 0:
             return framework.replace("__CONTENT__", get_empty_html())
+        recommendations = sorted(
+            recommendations, key=lambda x: x.get("relevance_score", 0), reverse=True
+        )
         for i, p in enumerate(tqdm(recommendations, desc="Rendering Emails")):
-            rate = get_stars(p["relevance_score"])
+            score = float(p.get("relevance_score", 0))
+            rate = get_stars(score)
             parts.append(
                 get_block_html(
-                    str(i + 1) + ". " + p["title"],
+                    str(i + 1) + ". " + p.get("title", ""),
                     rate,
-                    p["arXiv_id"],
-                    p["summary"],
-                    p["pdf_url"],
+                    p.get("arXiv_id", ""),
+                    p.get("summary", ""),
+                    p.get("pdf_url", ""),
                 )
             )
         summary = self.summarize(recommendations)
@@ -410,12 +553,14 @@ class ArxivDaily:
         msg["Subject"] = Header(f"{title} {today}", "utf-8").encode()
 
         try:
-            server = smtplib.SMTP(smtp_server, smtp_port)
-            server.starttls()
+            if smtp_port == 465:
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+            else:
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
         except Exception as e:
-            logger.warning(f"Failed to use TLS. {e}")
-            logger.warning(f"Try to use SSL.")
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+            logger.warning(f"Failed to initialize SMTP connection. {e}")
+            raise
 
         server.login(sender, password)
         server.sendmail(sender, receivers, msg.as_string())
@@ -426,8 +571,18 @@ if __name__ == "__main__":
     categories = ["cs.CV"]
     max_entries = 100
     max_paper_num = 50
-    provider = "ollama"
-    model = "deepseek-r1:7b"
+    lookback_hours = 24
+    include_keywords = None
+    exclude_keywords = None
+    include_mode = "any"
+    llm_batch_size = 5
+    weight_topic = 0.45
+    weight_method = 0.25
+    weight_novelty = 0.15
+    weight_impact = 0.15
+    model = "gpt-4o-mini"
+    base_url = ["https://api.openai.com/v1"]
+    api_key = ["*"]
     description = """
         I am working on the research area of computer vision and natural language processing. 
         Specifically, I am interested in the following fieds:
@@ -442,7 +597,26 @@ if __name__ == "__main__":
     """
 
     arxiv_daily = ArxivDaily(
-        categories, max_entries, max_paper_num, provider, model, None, None, description
+        categories,
+        max_entries,
+        max_paper_num,
+        lookback_hours,
+        include_keywords,
+        exclude_keywords,
+        include_mode,
+        llm_batch_size,
+        weight_topic,
+        weight_method,
+        weight_novelty,
+        weight_impact,
+        30,
+        model,
+        base_url,
+        api_key,
+        description,
+        4,
+        0.7,
+        "./arxiv_history",
     )
     recommendations = arxiv_daily.get_recommendation()
     print(recommendations)

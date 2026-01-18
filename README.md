@@ -2,146 +2,118 @@
 
 ---
 
-<p align="center"> Recommend new arxiv papers of your interest daily according to your customized description.
-    <br> 
-</p>
+<p align="center">基于你的研究兴趣描述，每日推荐你可能感兴趣的 arXiv 新论文，并通过邮件发送。<br></p>
 
 > [!NOTE]
-> This repo borrow the idea and some functions from [zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily). Thanks for their great work!😊
+> 本项目借鉴并复用了一部分 [zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily) 的思路与实现，感谢原作者的工作。
 
-## 🧐 Why I create this project <a name = "about"></a>
+## 主要特性
 
-- During the use of [zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily), I often find that the recommendation process didn't run in the way that I want. Since my study area has shifted, my Zotero include some papers that I'm not interested in anymore.
-- For those who **do not use zotero as PDF reader**, get customized arxiv recommendation is still needed.
-- For those that want to **set their own prompt** to guide LLM during paper selection and recommendation.
+- 可自定义提示词（prompt），控制 LLM 摘要与相关性评分逻辑。
+- 支持历史保存（`arxiv_history/`），便于回溯与复用缓存。
+- 批量打分 + Top-M 重排（rerank），减少同分并提升排序稳定性。
+- 邮件开头固定展示 Top-5，快速扫读。
+- 支持 GitHub Actions 定时运行，每日自动发送邮件。
+- 默认使用ModelScope提供的每日免费API（deepseek-ai/DeepSeek-V3.2）。
 
-## ✨ Key Features Compared with [zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily)
-
-- Fully customized LLM prompt to guide your paper recommendation process.
-- Ready-to-use leverage of recent models, include DeepSeek-R1/V3/...
-- Save your arXiv recommendation history.
-- Batch LLM scoring + rerank Top-M to reduce ties and stabilize ranking.
-- Fixed Top-5 recommendations at the start of the email.
-- Support multiple workers to speed up the recommendation process.
-
-## 📷 Screenshot
+## 截图
 
 ![screenshot](./assets/screenshot.png)
 
-## 🚀 Usage
+## 使用方法
 
-### Quick Start
+### 快速开始
 
-1. Run `git clone https://github.com/JoeLeelyf/customize-arxiv-daily.git`
-2. Run `pip install -r requirements.txt` to install necessary packages.
-   If you prefer using [`uv`](https://github.com/astral-sh/uv) for dependency management, run:
-
-   ```bash
-   uv sync
-   ```
-
-   This will create the virtual environment described by `pyproject.toml` and `uv.lock`.
-3. Get your STMP server. Common STMP service provider includes [QQ mail box](https://service.mail.qq.com/detail/0/427)
-4. Describe the research fields you're interested in, and the fields you're not. Edit the `description.txt`. For, example:
-
-```txt
-I am working on the research area of computer vision.
-Specifically, I am interested in the following fieds:
-1. Object detection
-2. AIGC (AI Generated Content)
-3. Multimodal Large Language Models
-
-I'm not interested in the following fields:
-1. 3D Vision
-2. Robotics
-3. Low-level Vision
-```
-
-5. Configure your own `arXiv catergories`, `api_key` and `models`. The repo supports **OpenAI-compatible** Chat Completions endpoints (including third-party services that expose the OpenAI API format). Meaning of different parameters:
-   - `--categories`: arXiv categories that you are interested in, like `cs.CV` `cs.AI`
-   - `--sender`: E-mail address that provide SMTP service, like, `123456@qq.com`
-   - `--receiver`: The e-mails address that you want to receive your notice, like, `my_gmail@gmail.com`
-   - `--save`: store_true, whether to save the arXiv results to local markdown files.
-
-- `main_gpt.sh`: Example runner for OpenAI-compatible APIs (supports model failover list and endpoint failover list).
+1. 克隆仓库
 
 ```bash
-python main.py --categories cs.CV cs.AI \
-    --model gpt-4o-mini \
-    --base_url https://api.openai.com/v1 --api_key * \
-    --smtp_server smtp.qq.com --smtp_port 465 \
-    --sender * --receiver * \
-    --sender_password * \
-    --num_workers 16 \
-    --lookback_hours 24 \
-    --llm_batch_size 5 \
-    --rerank_top_m 30 \
-    --title "Daily arXiv" \
-    --temperature 0.7 \
-    --save
+git clone https://github.com/shilong20/Arxiv-Daily.git
+cd customize-arxiv-daily
 ```
 
-6. Choose to run one of the following command in your CLI.
+2. 安装依赖（推荐 `uv`；也可用 `pip`）
 
+```bash
+uv sync
+# 或：pip install -r requirements.txt
 ```
+
+> 运行环境：Python 3.12+（工作流默认使用 3.12）。
+
+3. 配置你的研究兴趣（编辑 `description.txt`，中文/英文均可）
+
+4. 准备 SMTP 邮箱并注入密钥（避免把密钥/密码写进仓库）
+
+`main_gpt.sh` 默认通过环境变量读取密钥：
+
+```bash
+export MODELSCOPE_API_KEY="..."
+export SMTP_SENDER="xxx@qq.com"
+export SMTP_RECEIVER="yyy@gmail.com"
+export SMTP_PASSWORD="你的 SMTP 授权码/密码"
+```
+
+5. 运行
+
+```bash
 bash main_gpt.sh
 ```
 
+说明：
+- `main_gpt.sh` 里可以直接改 `--categories/--include_keywords/--exclude_keywords/--model/--base_url` 等参数来定制你的每日推荐。
+- 想查看完整参数说明：`uv run python main.py --help`。
 
-### Run with uv
+## 部署到 GitHub Actions（每日自动运行）
 
-After syncing dependencies you can execute the CLI through `uv run` (it will reuse the managed environment):
+仓库已包含工作流：`.github/workflows/daily.yml`，会定时执行 `bash main_gpt.sh`，并把 `state/seen_ids.json` 的更新提交回仓库，用于去重，防止重复处理/重复发邮件。
 
-```bash
-uv run python main.py --categories cs.CV cs.AI \
-    --model gpt-4o-mini \
-    --base_url https://api.openai.com/v1 --api_key * \
-    --smtp_server smtp.qq.com --smtp_port 465 \
-    --sender * --receiver * \
-    --sender_password * \
-    --num_workers 16 \
-    --lookback_hours 24 \
-    --llm_batch_size 5 \
-    --rerank_top_m 30 \
-    --title "Daily arXiv" \
-    --temperature 0.7 \
-    --save
-```
+### 1) 准备仓库（重要）
 
-7. \* **Run automatically everyday (GitHub Actions recommended).**
+GitHub 默认不会在“fork 的仓库”中触发 `schedule`（cron）事件。建议你用以下任一方式创建自己的仓库：
 
-This repo is designed to run daily with a **longer window** (e.g. last 4 days) + a persistent `seen_ids` database to avoid re-processing/re-emailing papers:
+- 方式 A（推荐）：新建一个仓库，把本项目代码推上去（不要用 fork）。
+- 方式 B：如果你必须 fork，请优先通过 `workflow_dispatch` 手动触发来验证，并确认你的仓库确实支持定时触发。
 
-- Window: `--lookback_hours 96` (covers weekend backlog)
-- Seen DB: `--seen_db state/seen_ids.json --seen_retention_days 30 --seen_scope base`
+### 2) 配置 Secrets
 
-Create GitHub Secrets:
-- `MODELSCOPE_API_KEY` (or your OpenAI-compatible API key)
-- `SMTP_SENDER`, `SMTP_RECEIVER`, `SMTP_PASSWORD`
+进入你的 GitHub 仓库：`Settings -> Secrets and variables -> Actions -> New repository secret`，添加：
 
-Then enable the workflow file: `.github/workflows/daily.yml` (it runs `bash main_gpt.sh` and commits the updated `state/seen_ids.json` back to the repo).
+- `MODELSCOPE_API_KEY`：模型服务的 API Key（或你的 OpenAI 兼容服务的 key；并据此修改 `main_gpt.sh` 的 `--base_url/--model`）
+- `SMTP_SENDER`：发件邮箱
+- `SMTP_RECEIVER`：收件邮箱
+- `SMTP_PASSWORD`：SMTP 授权码/密码
 
-8. \* **Adjust and customize your LLM prompt.** Edit `_build_batch_prompt(...)` / `_build_rerank_prompt(...)` in `arxiv_daily.py`.
+### 3) 赋予工作流写权限（用于回写 seen_ids）
 
-## Results
+进入：`Settings -> Actions -> General -> Workflow permissions`：
 
-### Running process in your CLI
+- 选择 `Read and write permissions`（否则工作流最后的 `git push` 会失败）。
 
-![CLI](./assets/cli.png)
+### 4) 调整每日运行时间（可选）
 
-### Markdown saved
+`.github/workflows/daily.yml` 使用 UTC cron。当前默认配置是“北京时间 06:00”，对应：
 
-![Markdown](./assets/markdown.png)
+- `cron: "0 22 * * *"`（UTC 22:00 = 北京时间次日 06:00）
 
-### E-mail received
+你可以按需修改 `schedule`。
 
-![Screenshot](./assets/screenshot.png)
+### 5) 验证一次（推荐）
 
-## 📖 How it works
+进入 `Actions`，手动触发工作流（`workflow_dispatch`），确认：
 
-- `util/request.py` fetches recent arXiv papers given your provided arXiv categories (via arXiv Atom API), and keeps only papers within the last 24 hours by default.
-- `arxiv_daily` will call LLM api to summarize every paper and get the relevance score.
-- `util/construct_email.py` construct the content of the email in HTML form and send it using SMTP service.
+- 工作流运行成功；
+- 你能收到邮件；
+- 仓库会出现一次对 `state/seen_ids.json` 的提交（若没有变化则不会提交）。
+
+## 自定义提示词（可选）
+
+可以在 `arxiv_daily.py` 中调整 `_build_batch_prompt(...)` / `_build_rerank_prompt(...)` 来修改 LLM 的摘要/打分逻辑。
+
+## 工作原理
+
+- `util/request.py`：根据你提供的 arXiv 分类抓取近期论文（arXiv Atom API），默认仅保留近 24 小时内的新论文。
+- `arxiv_daily.py`：调用 LLM 生成摘要与相关性评分，并排序/重排。
+- `util/construct_email.py`：组装 HTML 邮件并通过 SMTP 发送。
 
 ## 🔧 与“获取论文/筛选论文”密切相关的超参数
 
@@ -174,6 +146,6 @@ Then enable the workflow file: `.github/workflows/daily.yml` (it runs `bash main
 - **每日固定推荐**：邮件开头固定展示评分最高的前 5 篇论文（降序）。
 - **缓存（开启 `--save` 时）**：每篇论文的 LLM 结果会缓存到 `arxiv_history/<date>/json/<arXiv_id>.json`，重复运行同一天通常会复用缓存，显著减少 LLM 调用。
 
-## 📌 Limitations
+## 局限性
 
-- The recommendation process of LLM is unstable and the relevance score provided by different LLMs varies a lot.
+- LLM 的推荐与相关性评分存在不稳定性；不同模型之间的分数可比性也较弱，建议结合 `rerank` 与关键词过滤来提升稳定性与可控性。

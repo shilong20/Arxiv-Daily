@@ -1,14 +1,29 @@
-我的研究方向是计算机视觉（Computer Vision）中的生成式建模，核心关注扩散模型（Diffusion Models）与流模型（Flow Models，例如 Rectified Flow、Normalizing Flow）。
+我的研究方向是生成式建模（Generative Modeling），关注扩散模型（Diffusion Models）、流模型（Flow Models，例如 Flow Matching、Rectified Flow）以及自回归模型（Autoregressive Models）等生成架构（如果出现新的架构也欢迎）在可控生成、对齐与高效推理方面的理论与方法。
 
 我特别感兴趣的主题（出现这些内容时应提高相关性评分）：
-1. 扩散/流模型的新架构与训练目标
-2. 采样与加速：少步采样、蒸馏、强化学习、后训练
-3. 引导机制的研究：类似CFG等不需要训练的引导机制的解析和改进
-4. 理论与分析：对扩散/流模型泛化性、收敛性的分析
-5. 基于扩散/流模型的下游任务（如线性/非线性反问题求解）
 
-我不感兴趣的主题（出现这些内容时应显著降低相关性评分，除非与扩散/流模型的方法贡献直接相关）：
-1. 机器人与具身智能（Robotics/Embodied AI）
-2. 低层视觉（Low-level Vision，如去噪/去模糊/超分等传统任务；除非核心贡献是扩散/流模型方法）
-3. 大语言模型与纯 NLP（LLM/NLP；除非与扩散/流模型直接结合且贡献点在生成式建模）
-4. 纯工程堆叠、仅调参或缺乏方法创新的工作
+【主线一：Guidance / 可控生成 / 推理时优化】
+1. 各类 guidance 机制的理论分析、改进与统一框架（reward guidance、constraint guidance、search-based guidance 等）
+2. 推理时计算扩展（inference-time scaling）与 reward-centric 生成
+3. 生成模型下 guidance 的稳定性、偏差-方差分析与可证明保证
+4. 少步数（low-NFE）或自回归少步下的 guidance 设计与 bias–variance tradeoff
+
+【主线二：高效视觉生成 / DiT / 视频生成】
+5. Diffusion Transformer（DiT）的蒸馏、少步生成与推理加速
+6. 视频生成的 latency–quality tradeoff、可部署的 distillation/pruning
+7. 语义 latent space 的几何结构与表示学习
+
+【主线三：Flow Matching / Transport / 生成流的理论】
+8. Flow matching、Rectified Flow 与 Optimal Transport 的理论联系与改进（如 Wasserstein flow matching、轨迹直化、optimal acceleration transport）
+9. 生成流的几何、latent dynamics 与加速原理的数学分析
+
+【主线四：个性化偏好对齐 / Personalized Generation】
+10. 基于用户偏好/奖励的个性化生成（energy/reward/posterior 视角）
+11. 少样本反馈下的 personalized guidance、多目标对齐与在线自适应
+
+我不感兴趣的主题（出现这些内容时应显著降低相关性评分，除非与上述主线的方法贡献直接相关）：
+1. 反问题求解（Inverse Problems，如去模糊/超分/压缩感知；除非核心贡献是新的 guidance 框架或理论分析）
+2. 机器人与具身智能（Robotics/Embodied AI；除非核心是生成模型在规划/轨迹表示中的方法贡献）
+3. 低层视觉（Low-level Vision 传统任务；除非核心贡献是生成式方法）
+4. 大语言模型与纯 NLP（LLM/NLP；除非与扩散/流模型直接结合且贡献点在生成式建模）
+5. 纯工程堆叠、仅调参或缺乏方法创新的工作
